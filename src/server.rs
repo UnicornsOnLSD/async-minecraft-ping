@@ -214,6 +214,14 @@ impl StatusConnection {
             timeout: self.timeout,
         })
     }
+
+    pub fn get_address(&self) -> &str {
+        &self.address
+    }
+
+    pub fn get_port(&self) -> u16 {
+        self.port
+    }
 }
 
 /// Wraps a built connection
