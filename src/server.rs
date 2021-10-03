@@ -151,10 +151,10 @@ pub async fn connect(address: String) -> Result<StatusConnection> {
 
 /// Wraps a built connection
 pub struct StatusConnection {
-    stream: TcpStream,
-    protocol_version: usize,
-    address: String,
-    port: u16,
+    pub stream: TcpStream,
+    pub protocol_version: usize,
+    pub address: String,
+    pub port: u16,
 }
 
 impl StatusConnection {
