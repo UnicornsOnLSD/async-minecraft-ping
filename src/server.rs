@@ -1,7 +1,8 @@
 //! This module defines a wrapper around Minecraft's
 //! [ServerListPing](https://wiki.vg/Server_List_Ping)
 
-use anyhow::{Context, Result};
+use std::time::Duration;
+
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -18,6 +19,9 @@ pub enum ServerError {
 
     #[error("invalid JSON response: \"{0}\"")]
     InvalidJson(String),
+
+    #[error("mismatched pong payload (expected \"{expected}\", got \"{actual}\")")]
+    MismatchedPayload { expected: u64, actual: u64 },
 }
 
 impl From<protocol::ProtocolError> for ServerError {
@@ -90,6 +94,7 @@ pub struct StatusResponse {
 
 const LATEST_PROTOCOL_VERSION: usize = 578;
 const DEFAULT_PORT: u16 = 25565;
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Builder for a Minecraft
 /// ServerListPing connection.
@@ -97,6 +102,7 @@ pub struct ConnectionConfig {
     protocol_version: usize,
     address: String,
     port: u16,
+    timeout: Duration,
 }
 
 impl ConnectionConfig {
@@ -107,6 +113,7 @@ impl ConnectionConfig {
             protocol_version: LATEST_PROTOCOL_VERSION,
             address: address.into(),
             port: DEFAULT_PORT,
+            timeout: DEFAULT_TIMEOUT,
         }
     }
 
@@ -127,8 +134,16 @@ impl ConnectionConfig {
         self
     }
 
+    /// Sets a specific timeout for the
+    /// connection to use. If not specified, the
+    /// timeout defaults to two seconds.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Connects to the server and consumes the builder.
-    pub async fn connect(self) -> Result<StatusConnection> {
+    pub async fn connect(self) -> Result<StatusConnection, ServerError> {
         let stream = TcpStream::connect(format!("{}:{}", self.address, self.port))
             .await
             .map_err(|_| ServerError::FailedToConnect)?;
@@ -138,6 +153,7 @@ impl ConnectionConfig {
             protocol_version: self.protocol_version,
             address: self.address,
             port: self.port,
+            timeout: self.timeout,
         })
     }
 }
@@ -145,22 +161,28 @@ impl ConnectionConfig {
 /// Convenience wrapper for easily connecting
 /// to a server on the default port with
 /// the latest protocol version.
-pub async fn connect(address: String) -> Result<StatusConnection> {
+pub async fn connect(address: String) -> Result<StatusConnection, ServerError> {
     ConnectionConfig::build(address).connect().await
 }
 
 /// Wraps a built connection
 pub struct StatusConnection {
-    pub stream: TcpStream,
-    pub protocol_version: usize,
-    pub address: String,
-    pub port: u16,
+    stream: TcpStream,
+    protocol_version: usize,
+    address: String,
+    port: u16,
+    timeout: Duration,
 }
 
 impl StatusConnection {
     /// Sends and reads the packets for the
     /// ServerListPing status call.
-    pub async fn status(&mut self) -> Result<StatusResponse> {
+    ///
+    /// Consumes the connection and returns a type
+    /// that can only issue pings. The resulting
+    /// status body is accessible via the `status`
+    /// property on `PingConnection`.
+    pub async fn status(mut self) -> Result<PingConnection, ServerError> {
         let handshake = protocol::HandshakePacket::new(
             self.protocol_version,
             self.address.to_string(),
@@ -168,22 +190,81 @@ impl StatusConnection {
         );
 
         self.stream
-            .write_packet(handshake)
-            .await
-            .context("failed to write handshake packet")?;
+            .write_packet_with_timeout(handshake, self.timeout.clone())
+            .await?;
 
         self.stream
-            .write_packet(protocol::RequestPacket::new())
-            .await
-            .context("failed to write request packet")?;
+            .write_packet_with_timeout(protocol::RequestPacket::new(), self.timeout.clone())
+            .await?;
 
         let response: protocol::ResponsePacket = self
             .stream
-            .read_packet()
-            .await
-            .context("failed to read response packet")?;
+            .read_packet_with_timeout(self.timeout.clone())
+            .await?;
 
-        Ok(serde_json::from_str(&response.body)
-            .map_err(|_| ServerError::InvalidJson(response.body))?)
+        let status: StatusResponse = serde_json::from_str(&response.body)
+            .map_err(|_| ServerError::InvalidJson(response.body))?;
+
+        Ok(PingConnection {
+            stream: self.stream,
+            protocol_version: self.protocol_version,
+            address: self.address,
+            port: self.port,
+            status,
+            timeout: self.timeout,
+        })
+    }
+
+    pub fn get_address(&self) -> &str {
+        &self.address
+    }
+
+    pub fn get_port(&self) -> u16 {
+        self.port
+    }
+}
+
+/// Wraps a built connection
+///
+/// Constructed by calling `status()` on
+/// a `StatusConnection` struct.
+#[allow(dead_code)]
+pub struct PingConnection {
+    stream: TcpStream,
+    protocol_version: usize,
+    address: String,
+    port: u16,
+    timeout: Duration,
+    pub status: StatusResponse,
+}
+
+impl PingConnection {
+    /// Sends a ping to the Minecraft server with the
+    /// provided payload and asserts that the returned
+    /// payload is the same.
+    ///
+    /// Server closes the connection after a ping call,
+    /// so this method consumes the connection.
+    pub async fn ping(mut self, payload: u64) -> Result<(), ServerError> {
+        let ping = protocol::PingPacket::new(payload);
+
+        self.stream
+            .write_packet_with_timeout(ping, self.timeout.clone())
+            .await?;
+
+        let pong: protocol::PongPacket = self
+            .stream
+            .read_packet_with_timeout(self.timeout.clone())
+            .await?;
+
+        if pong.payload != payload {
+            return Err(ServerError::MismatchedPayload {
+                expected: payload,
+                actual: pong.payload,
+            }
+            .into());
+        }
+
+        Ok(())
     }
 }
