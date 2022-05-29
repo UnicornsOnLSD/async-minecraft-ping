@@ -239,6 +239,16 @@ pub struct PingConnection {
 }
 
 impl PingConnection {
+    /// Get the address
+    pub fn get_address(&self) -> &str {
+        &self.address
+    }
+
+    /// Get the port
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     /// Sends a ping to the Minecraft server with the
     /// provided payload and asserts that the returned
     /// payload is the same.
