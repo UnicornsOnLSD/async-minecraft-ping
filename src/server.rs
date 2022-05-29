@@ -240,7 +240,7 @@ pub struct PingConnection {
 
 impl PingConnection {
     /// Get the address
-    pub fn get_address(&self) -> &str {
+    pub fn address(&self) -> &str {
         &self.address
     }
 
